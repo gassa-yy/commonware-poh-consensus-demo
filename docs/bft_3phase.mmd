@@ -1,0 +1,7 @@
+flowchart TD
+    A[Client sends request to leader] --> B[Phase 1 Pre-Prepare: leader proposes block and sequence]
+    B --> C[Replicas validate proposal and broadcast Prepare]
+    C --> D[Phase 2 Prepare: collect prepare quorum]
+    D --> E[Replicas broadcast Commit]
+    E --> F[Phase 3 Commit: collect commit quorum]
+    F --> G[Finalize and execute block]

@@ -1,0 +1,12 @@
+flowchart TD
+    A[Start height H and round r] --> B[Select proposer by weighted round robin]
+    B --> C[Proposer extends PoH and builds proposal]
+    C --> D[Broadcast proposal with PoH checkpoint]
+    D --> E[Validators verify PoH and tx validity]
+    E --> F{Prepare quorum reached}
+    F -- no --> G[Timeout and next round]
+    G --> B
+    F -- yes --> H[Commit voting]
+    H --> I{Commit quorum reached}
+    I -- no --> G
+    I -- yes --> J[Finalize height H and move to H+1]
