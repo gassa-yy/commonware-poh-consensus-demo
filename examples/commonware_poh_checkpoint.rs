@@ -1,27 +1,27 @@
+use commonware_consensus::types::{Epoch, Round, View};
 use commonware_consensus::{Automaton, CertifiableAutomaton, Relay, Reporter};
-use commonware_cryptography::{ed25519, Hasher, Sha256, Signer};
-use commonware_p2p::Recipients;
+use commonware_cryptography::{Hasher, Sha256};
 use commonware_poh_consensus_demo::commonware::checkpoint::PohCheckpointPayload;
+use commonware_poh_consensus_demo::commonware::demo::run_checkpoint_consensus_demo;
 use commonware_poh_consensus_demo::core::poh::Poh;
-use commonware_poh_consensus_demo::core::types::PohCheckpoint;
 use commonware_utils::channel::oneshot;
 
 #[derive(Clone, Debug)]
-struct DemoContext {
+struct Context {
     height: u64,
     round: u64,
 }
 
 #[derive(Clone)]
-struct DemoAutomaton {
-    checkpoint: PohCheckpoint,
+struct AdapterAutomaton {
+    checkpoint_payload: Vec<u8>,
 }
 
-impl Automaton for DemoAutomaton {
-    type Context = DemoContext;
+impl Automaton for AdapterAutomaton {
+    type Context = Context;
     type Digest = commonware_cryptography::sha256::Digest;
 
-    async fn genesis(&mut self, _epoch: commonware_consensus::types::Epoch) -> Self::Digest {
+    async fn genesis(&mut self, _epoch: Epoch) -> Self::Digest {
         let mut h = Sha256::new();
         h.update(b"genesis");
         h.finalize()
@@ -29,20 +29,11 @@ impl Automaton for DemoAutomaton {
 
     async fn propose(&mut self, context: Self::Context) -> oneshot::Receiver<Self::Digest> {
         let (tx, rx) = oneshot::channel();
-        let payload = PohCheckpointPayload::from_checkpoint(
-            context.height,
-            context.round,
-            &self.checkpoint,
-            b"poh-checkpoint".to_vec(),
-        )
-        .expect("valid payload")
-        .encode()
-        .expect("encode");
-
         let mut h = Sha256::new();
-        h.update(&payload);
-        let digest = h.finalize();
-        let _ = tx.send(digest);
+        h.update(&self.checkpoint_payload);
+        h.update(&context.height.to_le_bytes());
+        h.update(&context.round.to_le_bytes());
+        let _ = tx.send(h.finalize());
         rx
     }
 
@@ -57,11 +48,11 @@ impl Automaton for DemoAutomaton {
     }
 }
 
-impl CertifiableAutomaton for DemoAutomaton {}
+impl CertifiableAutomaton for AdapterAutomaton {}
 
 #[derive(Clone)]
-struct DemoRelay;
-impl Relay for DemoRelay {
+struct AdapterRelay;
+impl Relay for AdapterRelay {
     type Digest = commonware_cryptography::sha256::Digest;
 
     async fn broadcast(&mut self, payload: Self::Digest) {
@@ -70,8 +61,8 @@ impl Relay for DemoRelay {
 }
 
 #[derive(Clone)]
-struct DemoReporter;
-impl Reporter for DemoReporter {
+struct AdapterReporter;
+impl Reporter for AdapterReporter {
     type Activity = String;
 
     async fn report(&mut self, activity: Self::Activity) {
@@ -81,26 +72,30 @@ impl Reporter for DemoReporter {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Commonware interface demo: PoH checkpoint consensus (no mempool)");
+    println!("Commonware PoH checkpoint consensus demo (no mempool)");
     println!(
-        "runtime module: {}",
+        "runtime module available: {}",
         std::any::type_name::<commonware_runtime::deterministic::Config>()
     );
 
+    // Step 1: Build a PoH checkpoint payload that can be proposed by consensus.
     let mut poh = Poh::new(2);
-    poh.advance("event-a");
-    poh.advance("event-b");
+    poh.advance("boot-event-1");
+    poh.advance("boot-event-2");
     let checkpoint = poh.checkpoint();
+    let payload = PohCheckpointPayload::from_checkpoint(1, 0, &checkpoint, b"bootstrap".to_vec())?;
+    let encoded_payload = payload.encode()?;
 
-    let mut automaton = DemoAutomaton {
-        checkpoint: checkpoint.clone(),
+    // Step 2: Drive the Commonware consensus trait boundary over the payload.
+    let mut automaton = AdapterAutomaton {
+        checkpoint_payload: encoded_payload,
     };
-    let mut relay = DemoRelay;
-    let mut reporter = DemoReporter;
+    let mut relay = AdapterRelay;
+    let mut reporter = AdapterReporter;
 
-    let _genesis = automaton.genesis(commonware_consensus::types::Epoch::new(0)).await;
+    let _genesis = automaton.genesis(Epoch::new(0)).await;
     let digest = automaton
-        .propose(DemoContext {
+        .propose(Context {
             height: 1,
             round: 0,
         })
@@ -109,7 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let verified = automaton
         .verify(
-            DemoContext {
+            Context {
                 height: 1,
                 round: 0,
             },
@@ -117,27 +112,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await
         .await?;
-
     let certified = automaton
-         .certify(commonware_consensus::types::Round::new(commonware_consensus::types::Epoch::new(0), commonware_consensus::types::View::new(1)), digest)
+        .certify(Round::new(Epoch::new(0), View::new(1)), digest)
         .await
         .await
         .unwrap_or(false);
 
     relay.broadcast(digest).await;
     reporter
-        .report(format!("height=1 round=0 verified={verified} certified={certified}"))
+        .report(format!(
+            "trait-boundary: verified={verified}, certified={certified}"
+        ))
         .await;
 
-    let pk = ed25519::PrivateKey::from_seed(7).public_key();
-    let recipients = Recipients::One(pk);
-    match recipients {
-        Recipients::One(_) => println!("p2p recipients path: one peer"),
-        Recipients::All => println!("p2p recipients path: all peers"),
-        Recipients::Some(v) => println!("p2p recipients path: {} peers", v.len()),
+    // Step 3: Run a full checkpoint-only finalization demo with signatures + quorum.
+    let summary = run_checkpoint_consensus_demo(5)?;
+    println!(
+        "finalized_heights={}/5 validators={} quorum={}",
+        summary.finalized.len(),
+        summary.validator_count,
+        summary.quorum
+    );
+    for rec in summary.finalized {
+        println!(
+            "finalized: h={} round=({},{}) tick={} voted_power={} digest={}",
+            rec.height,
+            rec.round.epoch().get(),
+            rec.round.view().get(),
+            rec.tick,
+            rec.voted_power,
+            rec.digest_hex
+        );
     }
 
-    println!("checkpoint tick={} head={}", checkpoint.tick, checkpoint.head);
-    println!("done");
     Ok(())
 }

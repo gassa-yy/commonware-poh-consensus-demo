@@ -1,51 +1,50 @@
-# Commonware Interface Guide
+# COMMONWARE_INTERFACE_GUIDE
 
-This document describes how this repo maps PoH checkpoint consensus into native
-Commonware integration points.
+## Goal
+Use Commonware stack APIs to build a **PoH checkpoint consensus** flow (no mempool), so interface boundaries are clear.
 
-## Target crates and version intent
-
-When crates are resolvable from crates.io, use:
-
+## Crates used
 - `commonware-consensus = "2026.2.0"`
 - `commonware-p2p = "2026.2.0"`
 - `commonware-runtime = "2026.2.0"`
 - `commonware-cryptography = "2026.2.0"`
 
-As of March 6, 2026 (local run in this workspace), crates.io DNS resolution is
-blocked in the execution environment, so these dependencies could not be pulled
-or compiled here.
+## Where each interface is used
 
-## Checkpoint payload contract
+### 1) Consensus trait boundary
+In `examples/commonware_poh_checkpoint.rs`:
+- `Automaton`
+- `CertifiableAutomaton`
+- `Relay`
+- `Reporter`
 
-The checkpoint payload used by the new example is implemented in
-`src/commonware/checkpoint.rs` and is intentionally strict so it can be passed
-to a real consensus transport unchanged:
+This is the exact boundary where your app-specific payload (PoH checkpoint bytes) plugs into consensus logic.
 
-- Versioned binary format (`CHECKPOINT_PAYLOAD_VERSION = 1`)
-- Contains `height`, `round`, PoH `tick`, PoH `head`, and `app_data`
-- App payload hard cap: `MAX_CHECKPOINT_APP_BYTES = 1024`
-- Deterministic encode/decode with validation and explicit errors
+### 2) Cryptography
+In `src/commonware/demo.rs`:
+- `ed25519::PrivateKey`
+- `Signer` / `Verifier`
+- `Sha256` (`Hasher`)
 
-## Interface mapping (no mempool)
+This signs and verifies votes over checkpoint digest, then checks quorum.
 
-For checkpoint-only consensus:
+### 3) Runtime and P2P
+In `examples/commonware_poh_checkpoint.rs` and `src/commonware/demo.rs`:
+- `commonware_runtime::deterministic::Config` (runtime path visibility)
+- `commonware_p2p::Recipients` (recipient model boundary)
 
-1. PoH emits checkpoint `(tick, head)` from the sequencer.
-2. Producer builds `PohCheckpointPayload`.
-3. Payload bytes are proposed to Commonware consensus (simplex path).
-4. Votes/certificates are transported over Commonware P2P channels.
-5. Runtime drives task scheduling and deterministic replay tests.
-6. Cryptography verifies signatures over payload digest/certificates.
+## Payload contract
+`src/commonware/checkpoint.rs` defines strict, versioned encoding:
+- fields: `height`, `round`, `checkpoint_tick`, `checkpoint_head_hex`, `app_data`
+- max app bytes: `1024`
+- deterministic `encode/decode`
+- explicit validation errors
 
-## Minimal runnable demo
+## Why this matters for your next step
 
-`examples/commonware_poh_checkpoint.rs` demonstrates:
+When you add mempool later, you only change **payload construction** and application logic:
+- checkpoint-only payload -> checkpoint + tx batch root payload
+- same consensus boundary (`Automaton/Relay/Reporter`)
+- same signature/quorum path
 
-- No mempool transactions
-- One proposal per emitted PoH checkpoint
-- Weighted quorum-based finalization flow
-- Payload encoding/decoding checks on the hot path
-
-This is a compileable adapter-level demo in this sandbox, and is ready to be
-wired to real `commonware-*` crate APIs once registry access is available.
+That keeps your architecture stable while evolving functionality.
