@@ -1,3 +1,4 @@
+pub mod commonware;
 pub mod core;
 
 pub use core::simulator::{run_simulation, Metrics, SimulationResult};
