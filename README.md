@@ -18,6 +18,7 @@ The original Python demo is still available at `demos/simulator.py`.
 cargo test
 cargo run -- --scenario normal
 cargo run -- --scenario byzantine --seed 7 --heights 20 --max-rounds 10
+cargo run --example commonware_poh_checkpoint
 ```
 
 Available scenarios:
@@ -39,6 +40,19 @@ cargo run -- --scenario packet-drops --json-out out/packet_drops.json --csv-out 
 ```bash
 python3 demos/simulator.py
 ```
+
+### PoH checkpoint example (no mempool)
+
+The native checkpoint-flow example is:
+
+```bash
+cargo run --example commonware_poh_checkpoint
+```
+
+It uses strict checkpoint payload encoding and quorum finalization logic in:
+
+- `src/commonware/checkpoint.rs`
+- `examples/commonware_poh_checkpoint.rs`
 
 ## Architecture
 
@@ -106,8 +120,11 @@ proposer_distribution:
 │   └── sim_invariants.rs
 ├── demos/
 │   └── simulator.py
+├── examples/
+│   └── commonware_poh_checkpoint.rs
 └── docs/
     ├── architecture.md
+    ├── COMMONWARE_INTERFACE_GUIDE.md
     ├── commonware_mapping.md
     ├── INVARIANTS.md
     └── LIMITATIONS.md
