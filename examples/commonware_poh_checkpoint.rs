@@ -1,73 +1,143 @@
-use commonware_poh_consensus_demo::commonware::checkpoint::{
-    PohCheckpointPayload, MAX_CHECKPOINT_APP_BYTES,
-};
+use commonware_consensus::{Automaton, CertifiableAutomaton, Relay, Reporter};
+use commonware_cryptography::{ed25519, Hasher, Sha256, Signer};
+use commonware_p2p::Recipients;
+use commonware_poh_consensus_demo::commonware::checkpoint::PohCheckpointPayload;
 use commonware_poh_consensus_demo::core::poh::Poh;
+use commonware_poh_consensus_demo::core::types::PohCheckpoint;
+use commonware_utils::channel::oneshot;
 
-#[derive(Debug, Clone)]
-struct Validator {
-    id: &'static str,
-    power: u64,
+#[derive(Clone, Debug)]
+struct DemoContext {
+    height: u64,
+    round: u64,
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let validators = vec![
-        Validator { id: "A", power: 5 },
-        Validator { id: "B", power: 3 },
-        Validator { id: "C", power: 2 },
-    ];
-    let total_power: u64 = validators.iter().map(|v| v.power).sum();
-    let quorum = (total_power * 2 / 3) + 1;
+#[derive(Clone)]
+struct DemoAutomaton {
+    checkpoint: PohCheckpoint,
+}
 
-    println!("commonware_poh_checkpoint_demo");
-    println!("validators: {:?}", validators);
-    println!("total_power={total_power}, quorum={quorum}");
-    println!("mempool=disabled (checkpoint-only proposals)");
+impl Automaton for DemoAutomaton {
+    type Context = DemoContext;
+    type Digest = commonware_cryptography::sha256::Digest;
 
-    let mut poh = Poh::new(2);
-    let mut finalized = 0u64;
-
-    for height in 1..=5u64 {
-        for e in 0..2u64 {
-            let event = format!("height={height};event={e}");
-            poh.advance(&event);
-        }
-
-        if !poh.should_emit_checkpoint() {
-            continue;
-        }
-
-        let checkpoint = poh.checkpoint();
-        let app_data = format!("checkpoint@height={height}").into_bytes();
-        let payload =
-            PohCheckpointPayload::from_checkpoint(height, 0, &checkpoint, app_data)?;
-        let encoded = payload.encode()?;
-        let decoded = PohCheckpointPayload::decode(&encoded)?;
-
-        let mut voted_power = 0u64;
-        for validator in &validators {
-            voted_power += validator.power;
-            println!("vote: validator={} power={}", validator.id, validator.power);
-            if voted_power >= quorum {
-                break;
-            }
-        }
-
-        if voted_power >= quorum {
-            finalized += 1;
-            println!(
-                "finalized: height={} tick={} head={} encoded_bytes={} app_bytes={}",
-                decoded.height,
-                decoded.checkpoint_tick,
-                decoded.checkpoint_head_hex,
-                encoded.len(),
-                decoded.app_data.len()
-            );
-        } else {
-            println!("failed: height={height} (quorum not reached)");
-        }
+    async fn genesis(&mut self, _epoch: commonware_consensus::types::Epoch) -> Self::Digest {
+        let mut h = Sha256::new();
+        h.update(b"genesis");
+        h.finalize()
     }
 
-    println!("summary: finalized_heights={finalized}/5");
-    println!("payload_limit_bytes={MAX_CHECKPOINT_APP_BYTES}");
+    async fn propose(&mut self, context: Self::Context) -> oneshot::Receiver<Self::Digest> {
+        let (tx, rx) = oneshot::channel();
+        let payload = PohCheckpointPayload::from_checkpoint(
+            context.height,
+            context.round,
+            &self.checkpoint,
+            b"poh-checkpoint".to_vec(),
+        )
+        .expect("valid payload")
+        .encode()
+        .expect("encode");
+
+        let mut h = Sha256::new();
+        h.update(&payload);
+        let digest = h.finalize();
+        let _ = tx.send(digest);
+        rx
+    }
+
+    async fn verify(
+        &mut self,
+        _context: Self::Context,
+        _payload: Self::Digest,
+    ) -> oneshot::Receiver<bool> {
+        let (tx, rx) = oneshot::channel();
+        let _ = tx.send(true);
+        rx
+    }
+}
+
+impl CertifiableAutomaton for DemoAutomaton {}
+
+#[derive(Clone)]
+struct DemoRelay;
+impl Relay for DemoRelay {
+    type Digest = commonware_cryptography::sha256::Digest;
+
+    async fn broadcast(&mut self, payload: Self::Digest) {
+        println!("relay.broadcast digest={payload}");
+    }
+}
+
+#[derive(Clone)]
+struct DemoReporter;
+impl Reporter for DemoReporter {
+    type Activity = String;
+
+    async fn report(&mut self, activity: Self::Activity) {
+        println!("reporter.activity={activity}");
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("Commonware interface demo: PoH checkpoint consensus (no mempool)");
+    println!(
+        "runtime module: {}",
+        std::any::type_name::<commonware_runtime::deterministic::Config>()
+    );
+
+    let mut poh = Poh::new(2);
+    poh.advance("event-a");
+    poh.advance("event-b");
+    let checkpoint = poh.checkpoint();
+
+    let mut automaton = DemoAutomaton {
+        checkpoint: checkpoint.clone(),
+    };
+    let mut relay = DemoRelay;
+    let mut reporter = DemoReporter;
+
+    let _genesis = automaton.genesis(commonware_consensus::types::Epoch::new(0)).await;
+    let digest = automaton
+        .propose(DemoContext {
+            height: 1,
+            round: 0,
+        })
+        .await
+        .await?;
+
+    let verified = automaton
+        .verify(
+            DemoContext {
+                height: 1,
+                round: 0,
+            },
+            digest,
+        )
+        .await
+        .await?;
+
+    let certified = automaton
+         .certify(commonware_consensus::types::Round::new(commonware_consensus::types::Epoch::new(0), commonware_consensus::types::View::new(1)), digest)
+        .await
+        .await
+        .unwrap_or(false);
+
+    relay.broadcast(digest).await;
+    reporter
+        .report(format!("height=1 round=0 verified={verified} certified={certified}"))
+        .await;
+
+    let pk = ed25519::PrivateKey::from_seed(7).public_key();
+    let recipients = Recipients::One(pk);
+    match recipients {
+        Recipients::One(_) => println!("p2p recipients path: one peer"),
+        Recipients::All => println!("p2p recipients path: all peers"),
+        Recipients::Some(v) => println!("p2p recipients path: {} peers", v.len()),
+    }
+
+    println!("checkpoint tick={} head={}", checkpoint.tick, checkpoint.head);
+    println!("done");
     Ok(())
 }
